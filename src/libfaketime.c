@@ -2498,7 +2498,7 @@ time_t time(time_t *time_tptr)
 #endif
 {
   struct timespec tp;
-  time_t result;
+  int result;
 
   ftpl_init();
 #ifdef MACOS_DYLD_INTERPOSE
@@ -3960,7 +3960,7 @@ int __clock_gettime(clockid_t clk_id, struct timespec *tp)
 time_t __time(time_t *time_tptr)
 {
   struct timespec tp;
-  time_t result;
+  int result;
 
   DONT_FAKE_TIME(result = (*real_clock_gettime)(CLOCK_REALTIME, &tp));
   if (result == -1) return -1;
