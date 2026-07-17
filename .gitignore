@@ -14,6 +14,8 @@ src/libfaketime.dylib.1
 src/libfaketime.1.dylib
 src/core
 src/faketime
+build/
+dist/
 
 # Local-only GitHub release upload token/settings.
 .env.upload
