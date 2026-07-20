@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0). Must match NEWS first line.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dist_tag: almalinux10
+            image: almalinux:10
+            pkg_mgr: dnf
+          - dist_tag: ubuntu2204
+            image: ubuntu:22.04
+            pkg_mgr: apt
+          - dist_tag: ubuntu2404
+            image: ubuntu:24.04
+            pkg_mgr: apt
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install build deps
+        run: |
+          set -eu
+          if [ "${{ matrix.pkg_mgr }}" = "dnf" ]; then
+            dnf -y install make gcc glibc-devel tar gawk python3 findutils
+          else
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get -y install --no-install-recommends \
+              build-essential python3 tar gawk ca-certificates
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Build package
+        run: |
+          FAKETIME_COMPILE_CFLAGS="-DFORCE_MONOTONIC_FIX" \
+            make package DIST_TAG=${{ matrix.dist_tag }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libfaketime-${{ matrix.dist_tag }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag='${{ steps.tag.outputs.tag }}'
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.tar.gz --clobber
+          else
+            gh release create "$tag" dist/*.tar.gz \
+              --title "$tag" \
+              --notes "Built libfaketime artifacts for $tag"
+          fi

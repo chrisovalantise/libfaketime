@@ -23,7 +23,8 @@ DESTDIR ?= $(CURDIR)/build/root
 DIST_DIR := dist
 RELEASE_TAG := $(shell awk 'NR == 1 {print $$5}' NEWS)
 VERSION := $(patsubst v%,%,$(RELEASE_TAG))
-PACKAGE := $(DIST_DIR)/libfaketime-$(VERSION)-$(UNAME)-$(ARCH).tar.gz
+DIST_TAG ?= $(UNAME)
+PACKAGE := $(DIST_DIR)/libfaketime-$(VERSION)-$(DIST_TAG)-$(ARCH).tar.gz
 GITHUB_REPOSITORY := chrisovalantise/libfaketime
 
 .PHONY: all
@@ -57,7 +58,7 @@ uninstall:
 
 .PHONY: package
 package:
-	rm -rf "$(DESTDIR)" "$(DIST_DIR)"
+	rm -rf "$(DESTDIR)"
 	$(MAKE) install
 	$(INSTALL) -dm0755 "$(DIST_DIR)"
 	$(TAR) -C "$(DESTDIR)" -czf "$(PACKAGE)" .
