@@ -1,19 +1,13 @@
-List of changes for v1.0.1
-==========================
-
-Since v1.0.0:
-    - Multi-distro release workflow (AlmaLinux 10, Ubuntu 22.04, Ubuntu 24.04)
-    - Makefile: DIST_TAG parameter for per-distro package names
-    - Native package targets: `make rpm` (AlmaLinux/RHEL) and `make deb` (Ubuntu/Debian) via fpm
-    - Release artifacts now include .rpm and .deb alongside the .tar.gz
-
 List of changes for v1.0.0
 ==========================
 
 Since 0.9.12:
     - Fork under chrisovalantise/libfaketime for Health Lottery TIME env
     - Built stateless by default (FAKE_STATELESS)
-    - New Makefile release/push workflow (GitHub releases + artifacts)
+    - Multi-distro release workflow (AlmaLinux 10, Ubuntu 22.04, Ubuntu 24.04)
+    - Makefile: DIST_TAG parameter for per-distro package names, RELEASE_TAG overridable from CI
+    - Native package targets: `make rpm` (AlmaLinux/RHEL) and `make deb` (Ubuntu/Debian) via fpm
+    - Release artifacts include .tar.gz + .rpm + .deb per distro
 
 Since 0.9.11:
     - Improved macOS compatibility (@usertam)

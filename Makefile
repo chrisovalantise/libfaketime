@@ -21,7 +21,7 @@ PREFIX ?= /usr/local
 DESTDIR ?= $(CURDIR)/build/root
 
 DIST_DIR := dist
-RELEASE_TAG := $(shell awk 'NR == 1 {print $$5}' NEWS)
+RELEASE_TAG ?= $(shell awk 'NR == 1 {print $$5}' NEWS)
 VERSION := $(patsubst v%,%,$(RELEASE_TAG))
 DIST_TAG ?= $(UNAME)
 PACKAGE := $(DIST_DIR)/libfaketime-$(VERSION)-$(DIST_TAG)-$(ARCH).tar.gz

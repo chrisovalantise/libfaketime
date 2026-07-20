@@ -52,10 +52,22 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build tarball + native package
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
           FAKETIME_COMPILE_CFLAGS="-DFORCE_MONOTONIC_FIX" \
-            make ${{ matrix.native }} DIST_TAG=${{ matrix.dist_tag }}
+            make ${{ matrix.native }} DIST_TAG=${{ matrix.dist_tag }} RELEASE_TAG=$RELEASE_TAG
           ls -la dist/
 
       - uses: actions/upload-artifact@v4
