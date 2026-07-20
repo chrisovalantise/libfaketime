@@ -27,6 +27,14 @@ DIST_TAG ?= $(UNAME)
 PACKAGE := $(DIST_DIR)/libfaketime-$(VERSION)-$(DIST_TAG)-$(ARCH).tar.gz
 GITHUB_REPOSITORY := chrisovalantise/libfaketime
 
+FPM ?= fpm
+FPM_COMMON := -s dir -n libfaketime -v $(VERSION) \
+	--iteration $(DIST_TAG) \
+	--license GPL-2.0-or-later \
+	--maintainer "chrisovalantise <libfaketime@invalid>" \
+	--url "https://github.com/$(GITHUB_REPOSITORY)" \
+	--description "libfaketime intercepts system calls that retrieve the current date and time."
+
 .PHONY: all
 all:
 	$(MAKE) $(SELECTOR) -C src PREFIX="$(PREFIX)" all
@@ -62,6 +70,25 @@ package:
 	$(MAKE) install
 	$(INSTALL) -dm0755 "$(DIST_DIR)"
 	$(TAR) -C "$(DESTDIR)" -czf "$(PACKAGE)" .
+
+SYS_DESTDIR := $(CURDIR)/build/sysroot
+
+.PHONY: sysroot
+sysroot:
+	rm -rf "$(SYS_DESTDIR)"
+	$(MAKE) install DESTDIR="$(SYS_DESTDIR)" PREFIX=/usr/local
+
+.PHONY: rpm
+rpm: package sysroot
+	cd "$(DIST_DIR)" && $(FPM) $(FPM_COMMON) -t rpm -a $(ARCH) \
+		--rpm-summary "faketime library and wrapper" \
+		-C "$(SYS_DESTDIR)" usr
+
+.PHONY: deb
+deb: package sysroot
+	cd "$(DIST_DIR)" && $(FPM) $(FPM_COMMON) -t deb \
+		-a $(shell dpkg --print-architecture 2>/dev/null || echo amd64) \
+		-C "$(SYS_DESTDIR)" usr
 
 .PHONY: build
 build: package

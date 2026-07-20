@@ -22,12 +22,15 @@ jobs:
           - dist_tag: almalinux10
             image: almalinux:10
             pkg_mgr: dnf
+            native: rpm
           - dist_tag: ubuntu2204
             image: ubuntu:22.04
             pkg_mgr: apt
+            native: deb
           - dist_tag: ubuntu2404
             image: ubuntu:24.04
             pkg_mgr: apt
+            native: deb
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
     steps:
@@ -35,25 +38,33 @@ jobs:
         run: |
           set -eu
           if [ "${{ matrix.pkg_mgr }}" = "dnf" ]; then
-            dnf -y install make gcc glibc-devel tar gawk python3 findutils
+            dnf -y install epel-release || true
+            dnf -y install make gcc glibc-devel tar gawk python3 findutils \
+                           rpm-build ruby ruby-devel rubygems redhat-rpm-config
           else
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get -y install --no-install-recommends \
-              build-essential python3 tar gawk ca-certificates
+              build-essential python3 tar gawk ca-certificates \
+              ruby ruby-dev rubygems dpkg-dev
           fi
+          gem install --no-document fpm
 
       - uses: actions/checkout@v4
 
-      - name: Build package
+      - name: Build tarball + native package
         run: |
           FAKETIME_COMPILE_CFLAGS="-DFORCE_MONOTONIC_FIX" \
-            make package DIST_TAG=${{ matrix.dist_tag }}
+            make ${{ matrix.native }} DIST_TAG=${{ matrix.dist_tag }}
+          ls -la dist/
 
       - uses: actions/upload-artifact@v4
         with:
           name: libfaketime-${{ matrix.dist_tag }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.rpm
+            dist/*.deb
           if-no-files-found: error
 
   release:
@@ -84,10 +95,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag='${{ steps.tag.outputs.tag }}'
+          shopt -s nullglob
+          artifacts=(dist/*.tar.gz dist/*.rpm dist/*.deb)
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/*.tar.gz --clobber
+            gh release upload "$tag" "${artifacts[@]}" --clobber
           else
-            gh release create "$tag" dist/*.tar.gz \
+            gh release create "$tag" "${artifacts[@]}" \
               --title "$tag" \
               --notes "Built libfaketime artifacts for $tag"
           fi
