@@ -202,6 +202,23 @@ struct __timeval64
  */
 static __thread bool dont_fake = false;
 
+/*
+ * Guards against hosts that call our interposed wrappers before (or while) our
+ * constructor has finished resolving the real_* pointers and initialising the
+ * pthread bookkeeping. Oracle's server binary does exactly this during early
+ * process init: it enters pthread_cond_ and clock_gettime wrappers while the
+ * real_* pointers are still NULL and monotonic_conds_lock is not yet
+ * initialised, so the original code jumped through a NULL pointer / locked an
+ * uninitialised rwlock and crashed the whole server (SIGSEGV, seen as
+ * ORA-12547). These flags let the wrappers pass straight
+ * through to libc until we are fully initialised, and never fake time before
+ * init has completed.
+ */
+static volatile int ftpl_init_complete = 0;
+#ifdef FAKE_PTHREAD
+static volatile int monotonic_conds_lock_ready = 0;
+#endif
+
 /* Wrapper for function calls, which we want to return system time */
 #define DONT_FAKE_TIME(call)          \
   do {                                \
@@ -213,6 +230,30 @@ static __thread bool dont_fake = false;
     call;                             \
     dont_fake = dont_fake_orig;       \
   } while (0)
+
+/*
+ * libfaketime interposes both the `stat`/`fstat` and the `__xstat`/`__fxstat`
+ * families. On glibc < 2.33, `stat`/`fstat` are only header inlines (the real
+ * exported libc symbols are `__xstat`/`__fxstat`), so a *reference* to the bare
+ * `stat`/`fstat` symbols is defined solely by this library. Under a consumer
+ * linked with `-z now` (Oracle's server binary), the loader eagerly resolves
+ * every relocation of every object — including this preloaded one — and the
+ * self-referential `stat` JUMP_SLOT cannot be bound, aborting the process with
+ * "undefined symbol: stat" (surfaces as ORA-12547). Routing our own internal
+ * calls through the glibc-backed `__xstat`/`__fxstat` symbols avoids emitting
+ * the unbindable `stat`/`fstat` references. On glibc >= 2.33 (and non-glibc)
+ * `stat`/`fstat` are genuine exported symbols, so the plain calls are fine.
+ */
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#  if !__GLIBC_PREREQ(2, 33)
+#    define FT_INTERNAL_STAT(path, buf)  __xstat(_STAT_VER, (path), (buf))
+#    define FT_INTERNAL_FSTAT(fd, buf)   __fxstat(_STAT_VER, (fd), (buf))
+#  endif
+#endif
+#ifndef FT_INTERNAL_STAT
+#  define FT_INTERNAL_STAT(path, buf)  stat((path), (buf))
+#  define FT_INTERNAL_FSTAT(fd, buf)   fstat((fd), (buf))
+#endif
 
 /* pointers to real (not faked) functions */
 static int          (*real_stat)            (const char *, struct stat *);
@@ -2504,12 +2545,21 @@ time_t time(time_t *time_tptr)
 #ifdef MACOS_DYLD_INTERPOSE
   DONT_FAKE_TIME(result = (*clock_gettime)(CLOCK_REALTIME, &tp));
 #else
+  if (real_clock_gettime == NULL)
+  {
+    real_clock_gettime = dlsym(RTLD_NEXT, "__clock_gettime");
+    if (real_clock_gettime == NULL)
+      real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
+  }
+  if (real_clock_gettime == NULL) return -1;
   DONT_FAKE_TIME(result = (*real_clock_gettime)(CLOCK_REALTIME, &tp));
 #endif
   if (result == -1) return -1;
 
-  /* pass the real current time to our faking version, overwriting it */
-  (void)fake_clock_gettime(CLOCK_REALTIME, &tp);
+  /* pass the real current time to our faking version, overwriting it (skipped
+   * until the constructor has fully completed). */
+  if (ftpl_init_complete)
+    (void)fake_clock_gettime(CLOCK_REALTIME, &tp);
 
   if (time_tptr != NULL)
   {
@@ -2599,6 +2649,12 @@ int gettimeofday(struct timeval *tv, void *tz)
     return -1;
   }
 
+#ifndef MACOS_DYLD_INTERPOSE
+  /* Early-init guard: resolve on the fly rather than dereferencing NULL. */
+  if (real_gettimeofday == NULL)
+    real_gettimeofday = dlsym(RTLD_NEXT, "gettimeofday");
+#endif
+
   /* Check whether we've got a pointer to the real ftime() function yet */
   if (!CHECK_MISSING_REAL(gettimeofday)) return -1;
 
@@ -2609,6 +2665,9 @@ int gettimeofday(struct timeval *tv, void *tz)
   DONT_FAKE_TIME(result = (*real_gettimeofday)(tv, tz));
 #endif
   if (result == -1) return result; /* original function failed */
+
+  /* Do not fake until the constructor has fully completed. */
+  if (!ftpl_init_complete) return result;
 
   /* pass the real current time to our faking version, overwriting it */
   result = fake_gettimeofday(tv);
@@ -2636,6 +2695,17 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp)
     return -1;
   }
 
+#ifndef MACOS_DYLD_INTERPOSE
+  /* Early-init guard: Oracle enters this before ftpl_really_init() resolves
+   * real_clock_gettime. Resolve on the fly rather than dereferencing NULL. */
+  if (real_clock_gettime == NULL)
+  {
+    real_clock_gettime = dlsym(RTLD_NEXT, "__clock_gettime");
+    if (real_clock_gettime == NULL)
+      real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
+  }
+#endif
+
   if (!CHECK_MISSING_REAL(clock_gettime)) return -1;
 
   /* initialize our result with the real current time */
@@ -2645,6 +2715,9 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp)
   DONT_FAKE_TIME(result = (*real_clock_gettime)(clk_id, tp));
 #endif
   if (result == -1) return result; /* original function failed */
+
+  /* Do not fake until the constructor has fully completed. */
+  if (!ftpl_init_complete) return result;
 
   /* pass the real current time to our faking version, overwriting it */
   if (fake_monotonic_clock || (clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_MONOTONIC_RAW
@@ -2851,7 +2924,7 @@ static void parse_ft_string(const char *user_faked_time)
       }
       else
       {
-        DONT_FAKE_TIME(ret = stat(getenv("FAKETIME_FOLLOW_FILE"), &master_file_stats));
+        DONT_FAKE_TIME(ret = FT_INTERNAL_STAT(getenv("FAKETIME_FOLLOW_FILE"), &master_file_stats));
         if (ret == -1)
         {
           fprintf(stderr, "libfaketime: Cannot get timestamp of file %s as requested by %% operator.\n", getenv("FAKETIME_FOLLOW_FILE"));
@@ -3076,6 +3149,7 @@ static void ftpl_really_init(void)
     fprintf(stderr,"monotonic_conds_lock init failed\n");
     exit(-1);
   }
+  monotonic_conds_lock_ready = 1;
 #endif
 #ifdef __APPLE__
   real_clock_get_time =     dlsym(RTLD_NEXT, "clock_get_time");
@@ -3305,7 +3379,7 @@ static void ftpl_really_init(void)
       exit(EXIT_FAILURE);
     }
 
-    fstat(infile, &sb);
+    FT_INTERNAL_FSTAT(infile, &sb);
     if (sizeof(stss[0]) > (infile_size = sb.st_size))
     {
       printf("There are no timestamps in the provided file to load timestamps from");
@@ -3378,6 +3452,9 @@ static void ftpl_really_init(void)
   }
 
   dont_fake = dont_fake_final;
+
+  /* From here on the wrappers may safely fake and touch pthread bookkeeping. */
+  ftpl_init_complete = 1;
 }
 
 static void init_initialized_once_mutex (void)
@@ -4046,12 +4123,41 @@ struct pthread_cond_monotonic {
 
 static struct pthread_cond_monotonic *monotonic_conds = NULL;
 
+/*
+ * Forward a pthread_cond_timedwait() call straight to the real implementation
+ * with the caller's original (unfaked) abstime. Used when we are called before
+ * our constructor finished, so we never dereference a NULL real_* pointer.
+ */
+static int ft_forward_cond_timedwait(ft_lib_compat_pthread compat,
+    pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime)
+{
+  static int (*fallback)(pthread_cond_t *, pthread_mutex_t *, const struct timespec *) = NULL;
+
+  switch (compat) {
+  case FT_COMPAT_GLIBC_2_3_2:
+    if (real_pthread_cond_timedwait_232 != NULL)
+      return real_pthread_cond_timedwait_232(cond, mutex, (struct timespec *)abstime);
+    break;
+  case FT_COMPAT_GLIBC_2_2_5:
+    if (real_pthread_cond_timedwait_225 != NULL)
+      return real_pthread_cond_timedwait_225(cond, mutex, (struct timespec *)abstime);
+    break;
+  }
+  if (fallback == NULL)
+    fallback = dlsym(RTLD_NEXT, "pthread_cond_timedwait");
+  if (fallback != NULL)
+    return fallback(cond, mutex, abstime);
+  return EINVAL;
+}
+
 int pthread_cond_init_232(pthread_cond_t *restrict cond, const pthread_condattr_t *restrict attr)
 {
   clockid_t clock_id;
   int result;
 
   ftpl_init();
+  if (real_pthread_cond_init_232 == NULL)
+    real_pthread_cond_init_232 = dlsym(RTLD_NEXT, "pthread_cond_init");
   if (!CHECK_MISSING_REAL(pthread_cond_init_232)) return -1;
   result = real_pthread_cond_init_232(cond, attr);
 
@@ -4060,7 +4166,8 @@ int pthread_cond_init_232(pthread_cond_t *restrict cond, const pthread_condattr_
 
   pthread_condattr_getclock(attr, &clock_id);
 
-  if (clock_id == CLOCK_MONOTONIC) {
+  /* Skip monotonic bookkeeping until the rwlock is initialised (early init). */
+  if (clock_id == CLOCK_MONOTONIC && monotonic_conds_lock_ready) {
     struct pthread_cond_monotonic *e = (struct pthread_cond_monotonic*)malloc(sizeof(struct pthread_cond_monotonic));
     e->ptr = cond;
 
@@ -4081,17 +4188,23 @@ int pthread_cond_destroy_232(pthread_cond_t *cond)
 
   ftpl_init();
 
-  if (pthread_rwlock_wrlock(&monotonic_conds_lock) != 0) {
-    fprintf(stderr,"can't acquire write monotonic_conds_lock\n");
-    exit(-1);
+  /* Skip monotonic bookkeeping until the rwlock is initialised (early init). */
+  if (monotonic_conds_lock_ready) {
+    if (pthread_rwlock_wrlock(&monotonic_conds_lock) != 0) {
+      fprintf(stderr,"can't acquire write monotonic_conds_lock\n");
+      exit(-1);
+    }
+    HASH_FIND_PTR(monotonic_conds, &cond, e);
+    if (e) {
+      HASH_DEL(monotonic_conds, e);
+      free(e);
+    }
+    pthread_rwlock_unlock(&monotonic_conds_lock);
   }
-  HASH_FIND_PTR(monotonic_conds, &cond, e);
-  if (e) {
-    HASH_DEL(monotonic_conds, e);
-    free(e);
-  }
-  pthread_rwlock_unlock(&monotonic_conds_lock);
 
+  if (real_pthread_cond_destroy_232 == NULL)
+    real_pthread_cond_destroy_232 = dlsym(RTLD_NEXT, "pthread_cond_destroy");
+  if (real_pthread_cond_destroy_232 == NULL) return 0;
   return real_pthread_cond_destroy_232(cond);
 }
 
@@ -4164,6 +4277,19 @@ int pthread_cond_timedwait_common(pthread_cond_t *cond, pthread_mutex_t *mutex, 
   int result = 0;
 
   ftpl_init();
+
+  /*
+   * Early-init guard. If our constructor has not fully completed, or the
+   * monotonic rwlock / real_clock_gettime are not ready yet, do not fake and
+   * do not touch the monotonic bookkeeping. Forward the caller's original
+   * abstime to the real implementation. Oracle's server binary reaches this
+   * path during process startup and the original code SIGSEGV'd on the NULL
+   * real_* pointer / uninitialised rwlock.
+   */
+  if (!ftpl_init_complete || !monotonic_conds_lock_ready || real_clock_gettime == NULL)
+  {
+    return ft_forward_cond_timedwait(compat, cond, mutex, abstime);
+  }
 
   if (abstime != NULL)
   {

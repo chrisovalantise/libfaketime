@@ -19,6 +19,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - dist_tag: oraclelinux8
+            image: oraclelinux:8
+            pkg_mgr: dnf
+            native: rpm
           - dist_tag: almalinux10
             image: almalinux:10
             pkg_mgr: dnf
