@@ -52,7 +52,11 @@ jobs:
               build-essential python3 tar gawk ca-certificates \
               ruby ruby-dev rubygems dpkg-dev
           fi
-          gem install --no-document fpm
+          if [ "${{ matrix.dist_tag }}" = "oraclelinux8" ]; then
+            gem install --no-document fpm -v 1.16.0
+          else
+            gem install --no-document fpm
+          fi
 
       - uses: actions/checkout@v4
 
